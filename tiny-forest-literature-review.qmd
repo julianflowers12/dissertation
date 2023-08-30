@@ -1,0 +1,208 @@
+---
+title: "Tiny Forest literature"
+editor: visual
+date: "`r format(Sys.Date(), '%B %d %Y')`"
+author: "SID: 2050507"
+institute: "Anglia Ruskin University"
+format: 
+   html:
+      toc: true
+      toc-location: left
+      toc-depth: 3
+      code-fold: true
+      code-summary: "Code"
+   docx: 
+      toc: true
+   pdf: 
+      toc: true
+execute: 
+  message: false
+  warning: false
+  echo: false
+  cache: false
+citations-hover: true
+bibliography: references.bib
+---
+
+## Introduction
+
+### Developing a search strategy
+
+I developed a search strategy for literature review by first identifying systematic reviews and meta-analyses of urban greenspace and biodiversity in Web of Science (WoS), Pubmed and Semanticscholar[@jones2015].
+
+```{r setup}
+library(needs)
+
+needs(tidyverse, spacyr, semanticscholar, jsonlite)
+library(srUtils)
+library(myScrapers)
+library(RISmed)
+
+
+```
+
+```{r setup-initialise-spacy, cache=TRUE}
+
+tinyForestR::initialise_tf()
+
+use_virtualenv("tinyforest")
+
+py_install("spacy", pip = TRUE, envname = "tinyforest")
+
+spacy_download_langmodel_virtualenv("en_core_web_lg", envname = "tinyforest")
+
+```
+
+```{r}
+
+spacy_initialize(model = "en_core_web_lg", virtualenv = "tinyforest", ask = TRUE)
+
+```
+
+search \<- "(green\* OR park OR forest) AND (urban) AND (diversity OR biodiversity OR species rich\*) sysematic\[sb\]"
+
+trial_search \<- "(green\* OR park OR forest) AND (urban) AND (diversity OR biodiversity OR species rich*) AND (reivew OR meta*analysis)"
+
+```{r, eval=FALSE}
+
+search <- "(tiny forest OR small wilderness OR pocket forest OR mini forest OR allotment* OR urban forest* OR community garden* OR greenspace OR green intrastructure) AND (diversity OR biodiversity OR species diversity OR species richness)"
+
+```
+
+```{r, eval=FALSE}
+
+s1 <- "urban AND biodiversity AND (synthesis OR systematic)"
+api_key <- "e4879094187828aa948bf61348587b8059f6814a"
+
+first_record <- seq(1, 600, 100)
+
+```
+
+## WOS search
+
+```{r, eval=FALSE}
+
+devtools::source_url("https://raw.githubusercontent.com/julianflowers/srUtils/main/R/search_wos.R")
+
+
+results <- map(1: length(first_record), \(x) search_wos(query = s1, api_key = "e4879094187828aa948bf61348587b8059f6814a", first_record = first_record[x]), .progress = TRUE)
+
+
+results[[1]]$count
+
+
+```
+
+
+## Semanticscholar search
+
+Needs to be less specific
+
+<https://www.semanticscholar.org/product/api> to request an API key
+
+Trial search strategy:
+
+> urban AND biodiversity AND (synthesis OR systematic OR meta-analysis)
+
+```{r}
+
+semanticscholar::S2_api()
+
+df <- fromJSON("https://api.semanticscholar.org/graph/v1/paper/search?query=urban+biodiversity+%29synthesisORsystematicORmeta-analysis%29&limit=100&offset=1&fields=paperId,title,abstract,tldr")
+
+df$total
+
+offset <- seq(1, df$total, 100)
+
+ss_search <- function(x){
+  
+  search <- fromJSON(paste0("https://api.semanticscholar.org/graph/v1/paper/search?query=urban+biodiversity+%29synthesisORsystematicORmeta-analysis%29&limit=100&offset=", offset[x], "&fields=paperId,title,abstract,year,journal,externalIds,tldr,openAccessPdf")
+  )
+                     
+  return(search)                   
+}
+
+safe_ss_search <- safely(ss_search, otherwise = NA_real_)
+
+sss <- map(1:length(offset), \(x) safe_ss_search(x), .progress = TRUE)
+
+sss1 <- map(sss, "result") |>
+  map("data") |>
+  list_rbind()
+
+sss_unnest <- sss1 |>
+  unnest("externalIds") |>
+  unnest("journal") |>
+  unnest("openAccessPdf") |>
+  unnest("tldr")
+
+
+```
+
+This returns `r nrow(sss1)` records.
+
+```{r}
+
+sss_unnest |>
+  count(year) |>
+  filter(year > 1999) |>
+  ggplot(aes(year, n)) +
+  geom_col()
+
+```
+
+```{r extract-entities-nounphrases, cache =TRUE}
+
+np <- spacy_extract_nounphrases(sss1$abstract, multithread = 6)
+ents <- spacy_extract_entity(sss1$abstract, multithread = 6)
+locations <- ents |>
+  filter(ent_type %in% c("LOC", "GPE"))
+
+np_filtered <- np |>
+  filter(str_detect(text, "meta|synthesis|systematic|review"))
+
+np_filtered |>
+  head()
+
+
+```
+
+```{r}
+
+sss_joined <- sss_unnest |>
+  mutate(doc_id = paste0("text", row_number())) |>
+  inner_join(np_filtered, by = "doc_id") |>
+  left_join(locations, by = "doc_id")
+
+```
+
+Using `DT` we can further review and filter the abstracts and download our selection as a csv, which we can then reimport for further analysis.
+
+```{r titles}
+
+sss_joined |>
+  select(paperId, DOI, title, abstract) |>
+  distinct() |>
+  DT::datatable(extensions = c('Select', 'Buttons', 'Responsive'), 
+                options = list(
+    select = list(style = 'os', items = 'row'),
+    dom = 'Blfrtip',
+    rowId = 0,
+    buttons = c('selectRows', 'csv')
+  ),
+  selection = 'none'
+)
+
+```
+
+```{r}
+
+path <- here::here("large-data")
+
+sr <- fs::dir_ls(path, regexp = "csv.") |>
+  read.csv()
+
+sr
+
+```
+
